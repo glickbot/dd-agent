@@ -10,6 +10,8 @@ from checks import AgentCheck
 import simplejson as json
 from boto.s3.connection import S3Connection
 
+import pprint
+
 class RiakCs(AgentCheck):
 
     STATS_BUCKET = 'riak-cs'
@@ -48,7 +50,36 @@ class RiakCs(AgentCheck):
 
       s3 = self._connect(s3_settings, aggregation_key)
 
-      stats = self._get_stats(s3, aggregation_key)
+      raw_stats = self._get_raw_stats(s3, aggregation_key)
+
+      stats = self._parse_stats(raw_stats)
+
+      json_file = open("/tmp/riakcs_in.json","w")
+      pprint.pprint(raw_stats, json_file)
+      json_file.close()
+
+      python_file = open("/tmp/riakcs_out.python", "w")
+      pprint.pprint(stats, python_file)
+      python_file.close()
+
+      funcs = {
+          'gauge': self.gauge,
+          'count': self.count
+      }
+
+      for row in stats:
+        try:
+            name, metric_type, value = row
+            func = funcs[metric_type]
+            func(name, value)
+        except Exception:
+            self.log.error(u'Could not submit metric: %s' % repr(row))
+
+    def _parse_stats(self, raw):
+
+      stats = json.loads(raw)
+      metric = 'riakcs'
+      output = []
 
       if stats:
 
@@ -56,16 +87,21 @@ class RiakCs(AgentCheck):
           if key not in stats:
             continue
           vals = stats[key]
-          self.count('riakcs.' + key, vals.pop(0))
+          self._add_metric(output, 'count', key, vals.pop(0))
           for gauge in self.STAT_GAUGES:
-            self.gauge('riakcs.' + key + "_" + gauge, vals.pop(0))
+            self._add_metric(output, 'gauge', '%s_%s' % (key, gauge), vals.pop(0))
 
         for key in self.POOL_KEYS:
           if key not in stats:
             continue
           vals = stats[key]
           for gauge in self.POOL_GAUGES:
-            self.gauge('riakcs.' + key + "_" + gauge, vals.pop(0))
+            self._add_metric(output, 'gauge', '%s_%s' % (key, gauge), vals.pop(0))
+
+      return output
+
+    def _add_metric(self, output, metric_type, name, value):
+      output.extend([('riakcs.%s' % name, metric_type, value)])
 
     def _connect(self, s3_settings, aggregation_key):
 
@@ -78,20 +114,18 @@ class RiakCs(AgentCheck):
 
       return s3
 
-    def _get_stats(self, s3, aggregation_key):
+    def _get_raw_stats(self, s3, aggregation_key):
 
       try:
           bucket = s3.get_bucket(self.STATS_BUCKET, validate=False)
           key = bucket.get_key(self.STATS_KEY)
-          stats_str = key.get_contents_as_string()
-          stats = json.loads(stats_str)
+          raw_stats = key.get_contents_as_string()
 
       except Exception, e:
           self._error("Error retrieving stats from " + aggregation_key, e)
           return
 
-      return stats
+      return raw_stats
 
     def _error(self, message, error):
-        self.warning(message + ": " + str(error))
-        self.log.critical(message + ": " + str(error))
+        raise Exception(message + ": " + str(error))
